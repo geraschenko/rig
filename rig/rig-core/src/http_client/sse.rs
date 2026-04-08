@@ -354,14 +354,10 @@ fn check_response<T>(response: Response<T>) -> Result<Response<T>, super::Error>
         return Err(super::Error::InvalidStatusCode(response.status()));
     };
 
-    let content_type =
-        if let Some(content_type) = response.headers().get(&reqwest::header::CONTENT_TYPE) {
-            content_type
-        } else {
-            return Err(super::Error::InvalidContentType(HeaderValue::from_static(
-                "",
-            )));
-        };
+    let Some(content_type) = response.headers().get(&reqwest::header::CONTENT_TYPE) else {
+        tracing::warn!("SSE response has no Content-Type header; assuming text/event-stream");
+        return Ok(response);
+    };
 
     if content_type
         .to_str()
