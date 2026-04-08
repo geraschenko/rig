@@ -5,6 +5,22 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+/// Two-step deserialization: `from_str` → `Value` → `from_value`.
+///
+/// Works around a known incompatibility between `serde_json`'s `arbitrary_precision`
+/// feature and `#[serde(flatten)]` on structs containing concrete numeric fields
+/// (`f64`, `u64`, `i64`, etc.). With `arbitrary_precision`, the parser encodes ALL
+/// numbers — not just floats — as tagged maps (`$serde_json::private::Number`),
+/// which `serde`'s `ContentDeserializer` rejects when encountered inside a flattened
+/// field. The intermediate `Value` normalises numbers back to concrete types via
+/// `Number::deserialize_any`, avoiding the issue.
+///
+/// See <https://github.com/serde-rs/json/issues/1157>.
+pub fn from_str_via_value<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(s)?;
+    serde_json::from_value(value)
+}
+
 pub fn empty_or_none(value: &Option<String>) -> bool {
     value.as_ref().map(|v| v.is_empty()).unwrap_or(true)
 }

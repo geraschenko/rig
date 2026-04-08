@@ -339,7 +339,7 @@ where
                             continue;
                         }
 
-                        let data = serde_json::from_str::<StreamingCompletionChunk>(&evt.data);
+                        let data = crate::json_utils::from_str_via_value::<StreamingCompletionChunk>(&evt.data);
 
                         let Ok(data) = data else {
                             let err = data.unwrap_err();
