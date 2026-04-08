@@ -763,14 +763,7 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
             }
             partial_history.extend(req.chat_history);
 
-            // Initialize full history with preamble (or empty if non-existent)
-            // Some "Responses API compatible" providers don't support `instructions` field
-            // so we need to add a system message until further notice
-            let mut full_history: Vec<InputItem> = if let Some(content) = req.preamble {
-                vec![InputItem::system_message(content)]
-            } else {
-                Vec::new()
-            };
+            let mut full_history: Vec<InputItem> = Vec::new();
 
             for history_item in partial_history {
                 full_history.extend(<Vec<InputItem>>::try_from(history_item)?);
@@ -867,7 +860,7 @@ impl TryFrom<(String, crate::completion::CompletionRequest)> for CompletionReque
         Ok(Self {
             input,
             model,
-            instructions: None, // is currently None due to lack of support in compliant providers
+            instructions: req.preamble,
             max_output_tokens: req.max_tokens,
             stream,
             tool_choice,
