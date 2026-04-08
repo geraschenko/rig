@@ -684,15 +684,15 @@ fn parse_server_event(payload: &str) -> Result<Option<ResponsesWebSocketEvent>, 
         kind: String,
     }
 
-    let event_type = serde_json::from_str::<EventType>(payload)?;
+    let event_type = crate::json_utils::from_str_via_value::<EventType>(payload)?;
     match event_type.kind.as_str() {
-        "error" => serde_json::from_str(payload)
+        "error" => crate::json_utils::from_str_via_value(payload)
             .map(|e| Some(ResponsesWebSocketEvent::Error(e)))
             .map_err(CompletionError::from),
-        "response.done" => serde_json::from_str(payload)
+        "response.done" => crate::json_utils::from_str_via_value(payload)
             .map(|d| Some(ResponsesWebSocketEvent::Done(d)))
             .map_err(CompletionError::from),
-        kind if is_known_streaming_event(kind) => match serde_json::from_str(payload)? {
+        kind if is_known_streaming_event(kind) => match crate::json_utils::from_str_via_value(payload)? {
             StreamingCompletionChunk::Response(response) => {
                 Ok(Some(ResponsesWebSocketEvent::Response(response)))
             }
