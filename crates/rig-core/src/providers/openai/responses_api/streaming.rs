@@ -270,10 +270,16 @@ impl RawChoiceAccumulator {
 
     fn decode_item_chunk(
         &mut self,
-        item: ItemChunkKind,
+        chunk: ItemChunk,
         options: ResponsesStreamOptions,
     ) -> Vec<StreamingRawChoice> {
         let mut immediate = Vec::new();
+
+        let ItemChunk {
+            item_id: outer_item_id,
+            data: item,
+            ..
+        } = chunk;
 
         match item {
             ItemChunkKind::OutputItemAdded(StreamingItemDoneOutput {
@@ -311,16 +317,18 @@ impl RawChoiceAccumulator {
                 immediate.push(streaming::RawStreamingChoice::Message(delta.delta));
             }
             ItemChunkKind::FunctionCallArgsDelta(delta) => {
-                let internal_call_id = self
-                    .tool_call_internal_ids
-                    .entry(delta.item_id.clone())
-                    .or_insert_with(|| nanoid::nanoid!())
-                    .clone();
-                immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
-                    id: delta.item_id,
-                    internal_call_id,
-                    content: streaming::ToolCallDeltaContent::Delta(delta.delta),
-                });
+                if let Some(item_id) = outer_item_id {
+                    let internal_call_id = self
+                        .tool_call_internal_ids
+                        .entry(item_id.clone())
+                        .or_insert_with(|| nanoid::nanoid!())
+                        .clone();
+                    immediate.push(streaming::RawStreamingChoice::ToolCallDelta {
+                        id: item_id,
+                        internal_call_id,
+                        content: streaming::ToolCallDeltaContent::Delta(delta.delta),
+                    });
+                }
             }
             _ => {}
         }
@@ -435,7 +443,7 @@ pub(crate) fn raw_choices_from_sse_body(
         if let Ok(chunk) = serde_json::from_str::<StreamingCompletionChunk>(data) {
             match chunk {
                 StreamingCompletionChunk::Delta(chunk) => {
-                    raw_choices.extend(accumulator.decode_item_chunk(chunk.data, options));
+                    raw_choices.extend(accumulator.decode_item_chunk(chunk, options));
                 }
                 StreamingCompletionChunk::Response(chunk) => {
                     let ResponseChunk { kind, response, .. } = *chunk;
@@ -668,7 +676,7 @@ where
 
                     match data {
                         StreamingCompletionChunk::Delta(chunk) => {
-                            for choice in accumulator.decode_item_chunk(chunk.data, options) {
+                            for choice in accumulator.decode_item_chunk(chunk, options) {
                                 yield Ok(choice);
                             }
                         }
@@ -807,8 +815,8 @@ pub struct DeltaTextChunk {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeltaTextChunkWithItemId {
-    pub item_id: String,
-    pub content_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_index: Option<u64>,
     pub sequence_number: u64,
     pub delta: String,
 }
@@ -829,7 +837,8 @@ pub struct RefusalTextChunk {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ArgsTextChunk {
-    pub content_index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_index: Option<u64>,
     pub sequence_number: u64,
     pub arguments: serde_json::Value,
 }
@@ -1093,6 +1102,68 @@ mod tests {
                     chunk.data,
                     ItemChunkKind::ContentPartDone(_)
                 )
+        ));
+    }
+
+    #[test]
+    fn function_call_args_delta_parses_without_content_index() {
+        // Real wire shape: `item_id` lives at the outer level (consumed by
+        // ItemChunk.item_id via flatten); `content_index` is not emitted by the
+        // server for function-call argument events. See
+        // tests/cassettes/openai/streaming_tools/streaming_tools_smoke.yaml.
+        let raw = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"sequence_number":3,"delta":"{\""}"#;
+        let chunk: StreamingCompletionChunk = crate::json_utils::from_str_via_value(raw)
+            .expect("function_call_arguments.delta should deserialize");
+        let StreamingCompletionChunk::Delta(chunk) = chunk else {
+            panic!("expected Delta variant");
+        };
+        assert_eq!(chunk.item_id.as_deref(), Some("fc_1"));
+        let ItemChunkKind::FunctionCallArgsDelta(delta) = chunk.data else {
+            panic!("expected FunctionCallArgsDelta variant");
+        };
+        assert_eq!(delta.delta, "{\"");
+        assert_eq!(delta.content_index, None);
+    }
+
+    #[test]
+    fn function_call_args_done_parses_without_content_index() {
+        let raw = r#"{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"sequence_number":12,"arguments":"{\"x\":2,\"y\":5}"}"#;
+        let chunk: StreamingCompletionChunk = crate::json_utils::from_str_via_value(raw)
+            .expect("function_call_arguments.done should deserialize");
+        let StreamingCompletionChunk::Delta(chunk) = chunk else {
+            panic!("expected Delta variant");
+        };
+        assert_eq!(chunk.item_id.as_deref(), Some("fc_1"));
+        let ItemChunkKind::FunctionCallArgsDone(done) = chunk.data else {
+            panic!("expected FunctionCallArgsDone variant");
+        };
+        assert_eq!(done.content_index, None);
+        assert_eq!(done.arguments.as_str(), Some("{\"x\":2,\"y\":5}"));
+    }
+
+    #[test]
+    fn function_call_args_delta_emits_tool_call_delta_with_outer_item_id() {
+        // Validates that decode_item_chunk routes the outer ItemChunk.item_id
+        // into the emitted ToolCallDelta when the variant body no longer
+        // duplicates it. Mirrors the live OpenAI wire format.
+        let raw = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_tool_1","output_index":0,"sequence_number":3,"delta":"{\""}"#;
+        let chunk: StreamingCompletionChunk = crate::json_utils::from_str_via_value(raw)
+            .expect("delta should deserialize");
+        let StreamingCompletionChunk::Delta(item_chunk) = chunk else {
+            panic!("expected Delta variant");
+        };
+
+        let mut accumulator = super::RawChoiceAccumulator::new(ResponsesUsage::new());
+        let options = super::ResponsesStreamOptions::strict();
+        let choices = accumulator.decode_item_chunk(item_chunk, options);
+
+        let [RawStreamingChoice::ToolCallDelta { id, content, .. }] = choices.as_slice() else {
+            panic!("expected one ToolCallDelta, got {choices:?}");
+        };
+        assert_eq!(id, "fc_tool_1");
+        assert!(matches!(
+            content,
+            crate::streaming::ToolCallDeltaContent::Delta(delta) if delta == "{\""
         ));
     }
 
